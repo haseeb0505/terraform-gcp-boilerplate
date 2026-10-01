@@ -9,3 +9,7 @@ crash.log
 .DS_Store
 *.bak
 tmp/
+
+# Cursor / AI rules
+.cursor/
+.cursorrules
