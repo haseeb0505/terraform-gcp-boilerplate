@@ -1,0 +1,75 @@
+# =============================================================================
+# GitHub Actions Template: Frontend Web Build & Deploy
+# =============================================================================
+# Copy this file to your Frontend Application repository under:
+#   .github/workflows/deploy.yml
+#
+# Required GitHub Secrets / Variables:
+#   - GCP_WORKLOAD_IDENTITY_PROVIDER
+#   - GCP_SERVICE_ACCOUNT
+#   - GCP_PROJECT_ID
+#   - GCP_REGION (e.g. us-central1)
+#   - NAME_PREFIX (e.g. myproject-dev or myproject-prod)
+#   - VITE_API_BASE_URL (e.g. https://api.example.com or /api/v1)
+# =============================================================================
+
+name: "Frontend CI/CD"
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    name: "Build & Deploy Frontend"
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Authenticate to Google Cloud via WIF"
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: "Set up Google Cloud SDK"
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: "Configure Docker for Artifact Registry"
+        run: |
+          gcloud auth configure-docker "${{ secrets.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: "Build and Push Docker Image"
+        env:
+          AR_REPO: "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.NAME_PREFIX }}"
+          COMMIT_SHA: ${{ github.sha }}
+          API_URL: ${{ secrets.VITE_API_BASE_URL }}
+        run: |
+          IMAGE_TAG="$AR_REPO/web:$COMMIT_SHA"
+          IMAGE_LATEST="$AR_REPO/web:latest"
+
+          echo "Building $IMAGE_TAG with VITE_API_BASE_URL=$API_URL..."
+          docker build --build-arg "VITE_API_BASE_URL=$API_URL" -t "$IMAGE_TAG" -t "$IMAGE_LATEST" .
+
+          echo "Pushing images..."
+          docker push "$IMAGE_TAG"
+          docker push "$IMAGE_LATEST"
+
+          echo "IMAGE=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: "Deploy to Cloud Run Web"
+        run: |
+          echo "Deploying new revision to Cloud Run Frontend..."
+          gcloud run services update "${{ secrets.NAME_PREFIX }}-web" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --image="$IMAGE"

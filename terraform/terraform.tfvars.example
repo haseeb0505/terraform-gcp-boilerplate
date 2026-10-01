@@ -1,0 +1,54 @@
+# =============================================================================
+# Local / Standalone Terraform Configuration Example (terraform.tfvars.example)
+# =============================================================================
+# Copy this file to terraform.tfvars if testing or running locally outside CI/CD:
+#   cp terraform.tfvars.example terraform.tfvars
+# =============================================================================
+
+project_id     = "YOUR_GCP_PROJECT_ID"
+project_number = "YOUR_GCP_PROJECT_NUMBER" # Optional locally; required in CI for WIF
+region         = "us-central1"
+name_prefix    = "boilerplate-demo"
+app_env        = "development"
+debug          = true
+
+# Feature toggles
+enable_frontend      = true
+enable_ai_apis       = false
+enable_migration_job = true
+enable_seed_job      = false
+
+# Migration command
+migration_command = ["alembic", "upgrade", "head"]
+
+# Network CIDRs
+app_subnet_cidr = "10.0.1.0/24"
+psa_range_cidr  = "10.0.2.0/23"
+
+# Database
+db_name         = "app_db"
+db_tier         = "db-custom-1-3840"
+db_disk_size_gb = 10
+
+# Storage
+gcs_bucket_name     = "YOUR_PROJECT_ID-uploads"
+gcs_bucket_location = "us-central1"
+
+# Bastion local access (add your Google account email)
+bastion_operator_members = [
+  # "user:your-email@example.com"
+]
+
+# Domains (leave empty until DNS is ready)
+frontend_domain = ""
+backend_domain  = ""
+cors_origins    = "http://localhost:3000,http://localhost:5173"
+
+# Secrets & Config
+app_env_vars = {
+  APP_TITLE = "My Boilerplate App"
+}
+
+app_secrets = {
+  JWT_SECRET = "REPLACE_ME"
+}

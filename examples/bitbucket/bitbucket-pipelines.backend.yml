@@ -1,0 +1,155 @@
+# Copy to the EI Backend repo as bitbucket-pipelines.yml
+# One file. Explicit env per branch (deployment: is not computed from the branch).
+# dev  → staging → myproject-dev-api
+# main → production  → myproject-prod-api
+# No GCP_SA_KEY.
+#
+# Bitbucket deployment variables (required on each deployment):
+#   PROJECT_ID, PROJECT_NUMBER, NAME_PREFIX, GCP_REGION
+
+image: google/cloud-sdk:slim
+
+definitions:
+  services:
+    docker:
+      memory: 3072
+  scripts:
+    - &require-vars |
+      test -n "$PROJECT_ID" || { echo "Set PROJECT_ID in this Bitbucket deployment"; exit 1; }
+      test -n "$PROJECT_NUMBER" || { echo "Set PROJECT_NUMBER in this Bitbucket deployment"; exit 1; }
+      test -n "$NAME_PREFIX" || { echo "Set NAME_PREFIX in this Bitbucket deployment"; exit 1; }
+      test -n "$GCP_REGION" || { echo "Set GCP_REGION in this Bitbucket deployment"; exit 1; }
+      export AR_REPO="${GCP_REGION}-docker.pkg.dev/${PROJECT_ID}/${NAME_PREFIX}"
+      echo "Using project=$PROJECT_ID prefix=$NAME_PREFIX region=$GCP_REGION"
+    - &wif-login |
+      test -n "$BITBUCKET_STEP_OIDC_TOKEN" || { echo "OIDC token missing"; exit 1; }
+      printf '%s' "$BITBUCKET_STEP_OIDC_TOKEN" > /tmp/oidc.jwt
+      printf '%s\n' "{\"type\":\"external_account\",\"audience\":\"//iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/bitbucket-pool/providers/bitbucket-provider\",\"subject_token_type\":\"urn:ietf:params:oauth:token-type:jwt\",\"token_url\":\"https://sts.googleapis.com/v1/token\",\"service_account_impersonation_url\":\"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/bitbucket-deployment-account@${PROJECT_ID}.iam.gserviceaccount.com:generateAccessToken\",\"credential_source\":{\"file\":\"/tmp/oidc.jwt\",\"format\":{\"type\":\"text\"}}}" > /tmp/wif.json
+      export GOOGLE_APPLICATION_CREDENTIALS=/tmp/wif.json
+      gcloud auth login --cred-file=/tmp/wif.json --quiet
+      gcloud config set project "$PROJECT_ID"
+      gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+    - &build-push |
+      export IMAGE="$AR_REPO/api:$BITBUCKET_COMMIT"
+      docker build --build-arg "OS_SECURITY_REFRESH=$BITBUCKET_COMMIT" -t "$IMAGE" -t "$AR_REPO/api:latest" .
+      docker push "$IMAGE"
+      docker push "$AR_REPO/api:latest"
+    - &scan-image |
+      # Block deploy on CRITICAL/HIGH CVEs (OS + Python/npm language packages).
+      # Automatic on-push scanning is enabled on Artifact Registry; this
+      # on-demand scan waits for results before Cloud Run update.
+      # CI SA needs roles/ondemandscanning.admin + roles/containeranalysis.occurrences.viewer
+      # google/cloud-sdk:slim disables the component manager; install the
+      # extractor the on-demand scan needs to unpack the remote image.
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq --no-install-recommends google-cloud-cli-local-extract
+      IMAGE="${IMAGE:-$AR_REPO/api:$BITBUCKET_COMMIT}"
+      echo "Scanning $IMAGE for CRITICAL/HIGH vulnerabilities..."
+      case "$GCP_REGION" in
+        asia-*) SCAN_LOC=asia ;;
+        europe-*|eu-*) SCAN_LOC=europe ;;
+        *) SCAN_LOC=us ;;
+      esac
+      SCAN=$(gcloud artifacts docker images scan "$IMAGE" --remote --location="$SCAN_LOC" --format='value(response.scan)')
+      test -n "$SCAN" || { echo "Image scan failed to return an ID"; exit 1; }
+      echo "Scan ID: $SCAN"
+      HITS=$(gcloud artifacts docker images list-vulnerabilities "$SCAN" \
+        --format='value(vulnerability.effectiveSeverity)' \
+        | grep -E '^(CRITICAL|HIGH)$' || true)
+      if [ -n "$HITS" ]; then
+        echo "Blocking deploy: CRITICAL or HIGH vulnerabilities found"
+        gcloud artifacts docker images list-vulnerabilities "$SCAN" \
+          --format='table(vulnerability.effectiveSeverity,vulnerability.cvssScore,vulnerability.packageIssue[0].affectedPackage,noteName)' \
+          | awk 'NR==1 || $1=="CRITICAL" || $1=="HIGH"'
+        exit 1
+      fi
+      echo "No CRITICAL/HIGH vulnerabilities; continuing deploy."
+
+    - &migrate-and-deploy |
+      IMAGE="$AR_REPO/api:$BITBUCKET_COMMIT"
+      gcloud run jobs update "${NAME_PREFIX}-migrate" --region="$GCP_REGION" --image="$IMAGE"
+      gcloud run jobs update "${NAME_PREFIX}-seed" --region="$GCP_REGION" --image="$IMAGE"
+      gcloud run jobs execute "${NAME_PREFIX}-migrate" --region="$GCP_REGION" --wait
+      gcloud run services update "${NAME_PREFIX}-api" --region="$GCP_REGION" --image="$IMAGE" --no-use-http2
+    - &deploy-latest |
+      gcloud run services update "${NAME_PREFIX}-api" --region="$GCP_REGION" --image="$AR_REPO/api:latest" --no-use-http2
+    - &migrate-only |
+      gcloud run jobs execute "${NAME_PREFIX}-migrate" --region="$GCP_REGION" --wait
+  steps:
+    - step: &deploy-dev
+        name: Build, Migrate & Deploy API (dev)
+        deployment: staging
+        size: 2x
+        oidc: true
+        trigger: automatic
+        services:
+          - docker
+        script:
+          - *require-vars
+          - *wif-login
+          - *build-push
+          - *scan-image
+          - *migrate-and-deploy
+    - step: &deploy-prod
+        name: Build, Migrate & Deploy API (prod)
+        deployment: production
+        size: 2x
+        oidc: true
+        trigger: automatic
+        services:
+          - docker
+        script:
+          - *require-vars
+          - *wif-login
+          - *build-push
+          - *scan-image
+          - *migrate-and-deploy
+    - step: &deploy-only-dev
+        name: Deploy existing api:latest (dev)
+        deployment: staging
+        oidc: true
+        script:
+          - *require-vars
+          - *wif-login
+          - *deploy-latest
+    - step: &deploy-only-prod
+        name: Deploy existing api:latest (prod)
+        deployment: production
+        oidc: true
+        script:
+          - *require-vars
+          - *wif-login
+          - *deploy-latest
+    - step: &migrate-only-dev
+        name: Run migrate job (dev)
+        deployment: staging
+        oidc: true
+        script:
+          - *require-vars
+          - *wif-login
+          - *migrate-only
+    - step: &migrate-only-prod
+        name: Run migrate job (prod)
+        deployment: production
+        oidc: true
+        script:
+          - *require-vars
+          - *wif-login
+          - *migrate-only
+
+pipelines:
+  branches:
+    dev:
+      - step: *deploy-dev
+    main:
+      - step: *deploy-prod
+  custom:
+    deploy-only-dev:
+      - step: *deploy-only-dev
+    deploy-only-prod:
+      - step: *deploy-only-prod
+    migrate-only-dev:
+      - step: *migrate-only-dev
+    migrate-only-prod:
+      - step: *migrate-only-prod

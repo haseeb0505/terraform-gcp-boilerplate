@@ -1,0 +1,92 @@
+# =============================================================================
+# GitHub Actions Template: Backend API Build, Scan & Deploy
+# =============================================================================
+# Copy this file to your Backend Application repository under:
+#   .github/workflows/deploy.yml
+#
+# Required GitHub Secrets / Variables:
+#   - GCP_WORKLOAD_IDENTITY_PROVIDER
+#   - GCP_SERVICE_ACCOUNT
+#   - GCP_PROJECT_ID
+#   - GCP_REGION (e.g. us-central1)
+#   - NAME_PREFIX (e.g. myproject-dev or myproject-prod)
+# =============================================================================
+
+name: "Backend CI/CD"
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    name: "Build, Scan & Deploy Backend"
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Authenticate to Google Cloud via WIF"
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: "Set up Google Cloud SDK"
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "beta"
+
+      - name: "Configure Docker for Artifact Registry"
+        run: |
+          gcloud auth configure-docker "${{ secrets.GCP_REGION }}-docker.pkg.dev" --quiet
+
+      - name: "Build and Push Docker Image"
+        env:
+          AR_REPO: "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.NAME_PREFIX }}"
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          IMAGE_TAG="$AR_REPO/api:$COMMIT_SHA"
+          IMAGE_LATEST="$AR_REPO/api:latest"
+
+          echo "Building $IMAGE_TAG..."
+          docker build -t "$IMAGE_TAG" -t "$IMAGE_LATEST" .
+
+          echo "Pushing images..."
+          docker push "$IMAGE_TAG"
+          docker push "$IMAGE_LATEST"
+
+          echo "IMAGE=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: "Vulnerability Scan Gate (Optional)"
+        continue-on-error: true
+        run: |
+          echo "Checking Artifact Registry container analysis results for: $IMAGE"
+          # Wait briefly for on-push scan or run ondemand scan if enabled
+
+      - name: "Execute Database Migration Job"
+        run: |
+          echo "Updating and executing migration job..."
+          gcloud run jobs update "${{ secrets.NAME_PREFIX }}-migrate" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --image="$IMAGE"
+
+          gcloud run jobs execute "${{ secrets.NAME_PREFIX }}-migrate" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --wait
+
+      - name: "Deploy to Cloud Run API"
+        run: |
+          echo "Deploying new revision to Cloud Run..."
+          gcloud run services update "${{ secrets.NAME_PREFIX }}-api" \
+            --region="${{ secrets.GCP_REGION }}" \
+            --image="$IMAGE"

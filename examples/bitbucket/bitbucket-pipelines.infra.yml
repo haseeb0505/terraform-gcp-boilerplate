@@ -1,0 +1,102 @@
+# Bitbucket deployment variables (required on each deployment):
+#   PROJECT_ID, PROJECT_NUMBER
+# WIF (pool bitbucket-pool, provider bitbucket-provider, SA bitbucket-deployment-account)
+# is client-managed. Pipeline authenticates against it; Terraform does not create it.
+image:
+  name: hashicorp/terraform:1.9
+  entrypoint:
+    - "/usr/bin/env"
+    - "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/bin"
+
+definitions:
+  scripts:
+    - &set-env-dev |
+      export ENV=dev
+      echo "Using env=$ENV"
+    - &set-env-prod |
+      export ENV=prod
+      echo "Using env=$ENV"
+    - &export-tf-vars |
+      test -n "$PROJECT_ID" || { echo "Set PROJECT_ID in this Bitbucket deployment"; exit 1; }
+      test -n "$PROJECT_NUMBER" || { echo "Set PROJECT_NUMBER in this Bitbucket deployment"; exit 1; }
+      export TF_VAR_project_id="$PROJECT_ID"
+      export TF_VAR_project_number="$PROJECT_NUMBER"
+    - &wif-auth |
+      test -n "$BITBUCKET_STEP_OIDC_TOKEN" || { echo "OIDC token missing"; exit 1; }
+      test -n "$PROJECT_ID" || { echo "PROJECT_ID not set"; exit 1; }
+      test -n "$PROJECT_NUMBER" || { echo "PROJECT_NUMBER not set"; exit 1; }
+      printf '%s' "$BITBUCKET_STEP_OIDC_TOKEN" > /tmp/oidc.jwt
+      printf '%s\n' "{\"type\":\"external_account\",\"audience\":\"//iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/bitbucket-pool/providers/bitbucket-provider\",\"subject_token_type\":\"urn:ietf:params:oauth:token-type:jwt\",\"token_url\":\"https://sts.googleapis.com/v1/token\",\"service_account_impersonation_url\":\"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/bitbucket-deployment-account@${PROJECT_ID}.iam.gserviceaccount.com:generateAccessToken\",\"credential_source\":{\"file\":\"/tmp/oidc.jwt\",\"format\":{\"type\":\"text\"}}}" > /tmp/wif.json
+      export GOOGLE_APPLICATION_CREDENTIALS=/tmp/wif.json
+    - &tf-init |
+      cd terraform
+      terraform init -input=false -reconfigure -backend-config="backends/${ENV}.hcl"
+    - &tf-plan |
+      terraform plan -input=false -var-file="envs/${ENV}.tfvars"
+    - &tf-plan-out |
+      terraform plan -input=false -var-file="envs/${ENV}.tfvars" -out=tfplan
+    - &tf-apply |
+      terraform apply -auto-approve -input=false tfplan
+  steps:
+    - step: &plan-dev
+        name: Terraform Plan (dev)
+        deployment: staging
+        oidc: true
+        trigger: automatic
+        script:
+          - *set-env-dev
+          - *export-tf-vars
+          - *wif-auth
+          - *tf-init
+          - *tf-plan
+    - step: &apply-dev
+        name: Terraform Plan and Apply (dev)
+        deployment: staging
+        oidc: true
+        trigger: automatic
+        script:
+          - *set-env-dev
+          - *export-tf-vars
+          - *wif-auth
+          - *tf-init
+          - *tf-plan-out
+          - *tf-apply
+    - step: &plan-prod
+        name: Terraform Plan (prod)
+        deployment: production
+        oidc: true
+        trigger: automatic
+        script:
+          - *set-env-prod
+          - *export-tf-vars
+          - *wif-auth
+          - *tf-init
+          - *tf-plan
+    - step: &apply-prod
+        name: Terraform Plan and Apply (prod)
+        deployment: production
+        oidc: true
+        trigger: automatic
+        script:
+          - *set-env-prod
+          - *export-tf-vars
+          - *wif-auth
+          - *tf-init
+          - *tf-plan-out
+          - *tf-apply
+
+pipelines:
+  branches:
+    dev:
+      - step: *apply-dev
+    main:
+      - step: *apply-prod
+  custom:
+    terraform-plan-dev:
+      - step: *plan-dev
+    terraform-apply-dev:
+      - step: *apply-dev
+    terraform-plan-prod:
+      - step: *plan-prod
+    terraform-apply-prod:
+      - step: *apply-prod

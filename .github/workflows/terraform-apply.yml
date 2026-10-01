@@ -1,0 +1,70 @@
+name: "Terraform Apply"
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-apply.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment to apply"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - prod
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apply:
+    name: "Terraform Apply"
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+
+    steps:
+      - name: "Checkout Code"
+        uses: actions/checkout@v4
+
+      - name: "Determine Environment"
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [ "${{ github.ref_name }}" = "main" ]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+          echo "env_name=$ENV" >> $GITHUB_OUTPUT
+
+      - name: "Authenticate to Google Cloud via WIF"
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: "Setup Terraform"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: "Initialize Terraform"
+        run: |
+          cd terraform
+          terraform init -input=false -reconfigure -backend-config="backends/${{ steps.env.outputs.env_name }}.hcl"
+
+      - name: "Terraform Apply"
+        env:
+          TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_project_number: ${{ secrets.GCP_PROJECT_NUMBER }}
+        run: |
+          cd terraform
+          terraform apply -auto-approve -input=false -var-file="envs/${{ steps.env.outputs.env_name }}.tfvars"

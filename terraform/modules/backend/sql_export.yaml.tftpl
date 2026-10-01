@@ -1,0 +1,33 @@
+main:
+  steps:
+    - init:
+        assign:
+          - project: "${project}"
+          - instance: "${instance}"
+          - database: "${database}"
+          - bucket: "${bucket}"
+          - formatted: $${time.format(sys.now())}
+          - year: $${text.substring(formatted, 0, 4)}
+          - month: $${text.substring(formatted, 5, 7)}
+          - day: $${text.substring(formatted, 8, 10)}
+          - stamp: $${text.replace_all(text.replace_all(text.substring(formatted, 0, 19), "-", ""), ":", "") + "Z"}
+          - uri: $${"gs://" + bucket + "/" + database + "/" + year + "/" + month + "/" + day + "/" + database + "-" + stamp + ".sql.gz"}
+    - exportDatabase:
+        call: googleapis.sqladmin.v1.instances.export
+        args:
+          project: $${project}
+          instance: $${instance}
+          body:
+            exportContext:
+              fileType: SQL
+              uri: $${uri}
+              databases:
+                - $${database}
+              offload: true
+          connector_params:
+            timeout: 3600
+        result: operation
+    - done:
+        return:
+          uri: $${uri}
+          operation: $${operation.name}
