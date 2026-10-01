@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - master
       - dev
     paths:
       - "terraform/**"
@@ -26,7 +27,7 @@ jobs:
       - name: "Determine Environment"
         id: env
         run: |
-          if [ "${{ github.base_ref }}" = "main" ]; then
+          if [ "${{ github.base_ref }}" = "main" ] || [ "${{ github.base_ref }}" = "master" ]; then
             echo "env_name=prod" >> $GITHUB_OUTPUT
             echo "target_env=production" >> $GITHUB_OUTPUT
           else

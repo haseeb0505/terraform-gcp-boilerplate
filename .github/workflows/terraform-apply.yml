@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - master
       - dev
     paths:
       - "terraform/**"
@@ -27,7 +28,7 @@ jobs:
   apply:
     name: "Terraform Apply"
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    environment: ${{ (github.ref_name == 'main' || github.ref_name == 'master') && 'production' || 'staging' }}
 
     steps:
       - name: "Checkout Code"
@@ -38,7 +39,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENV="${{ github.event.inputs.environment }}"
-          elif [ "${{ github.ref_name }}" = "main" ]; then
+          elif [ "${{ github.ref_name }}" = "main" ] || [ "${{ github.ref_name }}" = "master" ]; then
             ENV="prod"
           else
             ENV="dev"
